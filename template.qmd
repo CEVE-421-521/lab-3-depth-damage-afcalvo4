@@ -1,8 +1,8 @@
 ---
 title: "Lab 3: Depth-Damage Models"
 subtitle: "DataFrames and Distributions"
-author: "Your Name"
-date: 2024-01-26
+author: "Andres Calvo - ac228"
+date: 2024-01-31
 week: 3
 categories: [Lab]
 
@@ -23,8 +23,7 @@ format:
         code-line-numbers: true
         html-math-method: katex
 
-    # YOU CAN DO PDF OR DOCX BUT NOT BOTH
-    # IF YOU UNCOMMENT docx, COMMENT OR DELETE pdf
+
     pdf:
         documentclass: article
         fontsize: 11pt
@@ -41,8 +40,6 @@ format:
 
 date-format: "ddd., MMM. D"
 ---
-
-
 ```{julia}
 using CSV
 using DataFrames
@@ -55,11 +52,257 @@ using Unitful
 
 Plots.default(; margin=6Plots.mm)
 ```
+Pre - Process
+```{julia}
+#| output: false
 
+# Depth-damage dataset
+haz_fl_dept = CSV.read("data/haz_fl_dept.csv", DataFrame)
+# Data management function
+include("depthdamage.jl")
+
+# Interpolation function generator
+function get_depth_damage_function(
+    depth_train::Vector{<:T}, dmg_train::Vector{<:AbstractFloat}
+) where {T<:Unitful.Length}
+
+    # interpolate
+    depth_ft = ustrip.(u"ft", depth_train)
+    interp_fn = Interpolations.LinearInterpolation(
+        depth_ft, # <1>
+        dmg_train;
+        extrapolation_bc=Interpolations.Flat(), # <2>
+    )
+
+    damage_fn = function (depth::T2) where {T2<:Unitful.Length}
+        return interp_fn(ustrip.(u"ft", depth)) # <3>
+    end
+    return damage_fn # <4>
+end
+```
 # Site information
+1.	I choose the “Galveston – pier 21” primarily by my research interest in tropical cyclone hazards in the Houston Ship Channel (even that these places are apart, there might be some correlation). Floods caused by hurricane rainfall are important in this area (e.g. Extreme rainfall during hurricane Harvey). As mentioned in the instructions, this station have records continuously from early 1900’s. Other interest for a project were stations located in Alabama and in south of Texas considering that they have industrial complexes that are part of my research interest.
 
+2.	Two types of buildings were of my interest. The two-story typical house in the Galveston Island as well as light industrial buildings. Both type of buildings can be located in the vicinity of the gauge (<1 km). However, considering the research interest in industrial complexes, the light industrial (almost warehouse) building close to the channel is selected. Details can be found in the following figure:
+![Selected buiding in the Galveston channel (Pier 21)](figure1.png)
+ 
+3.	The height of the building was found using the provided tool ([USGS](https://apps.nationalmap.gov/viewer/)):
+**Elevation: 3.74 (m) / 12.29 (ft)**
+![Elevation data](figure2.png)
+ 
+4.	The depth-damage curve for this kind of buildings can be found in the extensive USACE Galveston catalog described in the HAZUS 5.1 Manual from [FEMA](https://www.fema.gov/sites/default/files/documents/fema_hazus-flood-model-technical-manual-5-1.pdf) as: *applicable to freshwater flooding, under slow-rise, slow-recession and little velocity*. The functions are obtained for the structure, content and inventory damage. These curves cannot be used for flooding from storm surges (hurricane). The structure damage is selected for the research interest, nevertheless, it is possible than content and equipment are more valuable (in absolute terms) than the structure itself. The description for this curve is 'Average light industrial, structure'.
 # Depth-Damage
+The information of the depth-damage curve is extracted using the given function `depthdamage.jl`. The scatter plot for the structural curve is the following:
+```{julia}
+#| output: false
+dd_structural = @rsubset(
+    haz_fl_dept, :Description == "Average light industrial, structure"
+)[1, :,]
+dd_content = @rsubset(
+    haz_fl_dept, :Description == "Average Light Industrial, Contents (Equipment/Inventory)"
+)[1, :,]
+dd_inventory= @rsubset(
+    haz_fl_dept, :Description == "Average Light Industrial, Inventory"
+)[1, :,]
+
+dd_str = DepthDamageData(dd_structural)
+dd_cont = DepthDamageData(dd_content)
+dd_inv = DepthDamageData(dd_inventory)
+
+scatter(
+    dd_str.depths,
+    dd_str.damages;
+    xlabel = "Flood deph",
+    ylabel = "Structural Damage (%)",
+    label = "$(dd_str.description) ($(dd_str.source))",
+    legend = :outertop,
+    color = "orangered",
+    size = (700,500),
+)
+```
+
+The interpolated curve looks as follows. The content and inventory curves are also plotted for comparisson purposes. The structural curve (shown in orange) is close to a linear behavior but the initial damage has a greater slope. The curve is formulated for up to 25 ft where it shows a damage of around 65%. Industrial buildings can be very tall so I imagine that this curve could be extrapolated using a regression instead of "flat", nevertheless, no data supports that from the USACE-galveston source. As mentioned before, contents (inventory, equipment) led to greater losses (up to 80%). 
+```{julia}
+#| echo: false
+dmg_fn_str = get_depth_damage_function(dd_str.depths, dd_str.damages)
+dmg_fn_cont = get_depth_damage_function(dd_cont.depths, dd_cont.damages)
+dmg_fn_inv = get_depth_damage_function(dd_inv.depths, dd_inv.damages)
+
+p = let
+    depths = uconvert.(u"ft", (-10.0u"ft"):(1.0u"inch"):(30.0u"ft"))
+    dmg_str = dmg_fn_str.(depths)
+    dmg_cont = dmg_fn_cont.(depths)
+    dmg_inv = dmg_fn_inv.(depths)
+    plot(
+        depths,
+        dmg_str;
+        xlabel = "Flood Depth",
+        ylabel = "Damage (%)",
+        label = "$(dd_str.description) ($(dd_str.source))",
+        legend = :outerbottom,
+        size = (700, 500),
+        color = "orangered",
+        linewidth = 3,
+    )
+    plot!(
+        depths,
+        dmg_cont;
+        label = "$(dd_cont.description) ($(dd_cont.source))",
+        color = "teal",
+        linewidth = 3,
+    )
+    plot!(
+        depths,
+        dmg_inv;
+        label = "$(dd_inv.description) ($(dd_inv.source))",
+        color = "dodgerblue4",
+        linewidth = 3,
+    )
+end
+p
+```
 
 # Expected annual damages
+The generalized extreme value distribution is used with the given parameters as follows. The simplified proccess of finding the buildings water level using the offset from the elevation data is also implemented. According to [NOAA](https://tidesandcurrents.noaa.gov/stationhome.html?id=8771450), the  Met Site elevation is 6.24 ft above MSL. The offset then is estimated as 6.05 ft.
 
+```{julia}
+gauge_dist = GeneralizedExtremeValue(5, 1.5, 0.1)
+p1 = plot(
+    gauge_dist;
+    label = "Gauge Distribution",
+    xlabel = "Water Level (ft)",
+    ylabel = "Probability Density",
+    legend = :topright,
+    color = "orangered",
+    linewidth = 3,
+)
+
+offset = 12.29 - 6.24 # Industrial buiding is 12.29 feet above gauge
+building_dist = GeneralizedExtremeValue(gauge_dist.μ - offset, gauge_dist.σ, gauge_dist.ξ)
+
+plot!(
+    p1,
+    building_dist;
+    label = "Building Distribution",
+    color = "dodgerblue4",
+    linewidth = 3)
+```
+The N = 1000 realizations of the distribution are computed using the random generator. The N-samples are shown in the following plot. The average damage for the structural, content and inventory are also printed.
+
+```{julia}
+N_samples = rand(gauge_dist,1000)
+N_depths = uconvert.(u"ft", (N_samples)u"ft")
+plot(
+    N_samples;
+    xlabel = "Samples",
+    ylabel = "Water elevation (ft)",
+    label = "Random GEV distribution samples",
+    legend = :outerbottom,
+    size = (700, 500),
+    color = "teal",
+)
+```
+```{julia}
+dmg_str = dmg_fn_str.(N_depths)
+dmg_cont = dmg_fn_cont.(N_depths)
+dmg_inv = dmg_fn_inv.(N_depths)
+
+boxplot(
+    ["Structural"],
+    dmg_str,
+    ylabel = "Damage (%)",
+    legend = false,
+    color = "orangered",
+)
+boxplot!(
+    ["Contents"],
+    dmg_cont,
+    color = "teal",
+)
+boxplot!(
+    ["Inventory"],
+    dmg_inv,
+    color = "dodgerblue4",
+)
+```
+**Average damage**
+```{julia}
+print("Structural mean damage: $(round(mean(dmg_str),digits = 2)) (%)\n")
+print("Content mean damage: $(round(mean(dmg_cont),digits = 2)) (%)\n")
+print("Inventory mean damage: $(round(mean(dmg_inv),digits = 2)) (%)")
+```
+
+Finally, some parameters are modified in the GEV distribution to understand the impact on the expected loses. Each parameter is modify by +50% of the initial given value while leaving the other two parameters unchanged. The analysis is only applied to the expected *structural* losses
+```{julia}
+loc_dist = GeneralizedExtremeValue(5 * 1.50, 1.5, 0.1)
+scl_dist = GeneralizedExtremeValue(5 , 1.5 * 1.5, 0.1)
+shp_dist = GeneralizedExtremeValue(5 , 1.5, 0.1 * 1.5)
+
+plot(
+    gauge_dist;
+    label = "μ: 5 σ: 1.5 ξ: 0.1",
+    xlabel = "Water Level (ft)",
+    ylabel = "Probability Density",
+    legend = :topright,
+    color = "orangered",
+    linewidth = 3,
+)
+plot!(
+    loc_dist;
+    label = "μ: 7.5",
+    color = "teal",
+    linewidth = 3)
+plot!(
+    scl_dist;
+    label = "σ: 2.25",
+    color = "dodgerblue4",
+    linewidth = 3)
+plot!(
+    shp_dist;
+    label = "ξ: 0.15",
+    color = "orchid4",
+    linestyle = :dash,
+    linewidth = 3)
+
+```
+```{julia}
+N_loc = rand(loc_dist,1000);N_loc = uconvert.(u"ft", (N_loc)u"ft")
+N_scl = rand(scl_dist,1000);N_scl = uconvert.(u"ft", (N_scl)u"ft")
+N_shp = rand(shp_dist,1000);N_shp = uconvert.(u"ft", (N_shp)u"ft")
+
+dmg_loc = dmg_fn_str.(N_loc)
+dmg_scl = dmg_fn_str.(N_scl)
+dmg_shp = dmg_fn_str.(N_shp)
+
+boxplot(
+    ["μ: 5 σ: 1.5 ξ: 0.1"],
+    dmg_str,
+    ylabel = "Structural damage (%)",
+    legend = false,
+    color = "orangered",
+)
+boxplot!(
+    ["μ: 7.5"],
+    dmg_loc,
+    color = "teal",
+)
+boxplot!(
+    ["σ: 2.25"],
+    dmg_scl,
+    color = "dodgerblue4",
+)
+boxplot!(
+    ["ξ: 0.15"],
+    dmg_shp,
+    color = "orchid4",
+)
+
+```
 # Discussion
+The expected damages (particularly for insurance claiming purposes) of a lightweight industrial building in the Galveston Island, Texas is close to 30% in average for the structural component. Nevertheless, this number can be up to 50% (and more) for some of the simulations. Even more, the maximum expected damage is close to 60%. For the contents, equipment and inventory the expected damages are larger which makes sense considering how these buildings are used in an industrial context.
+
+The model is sensitive to the hazard characterization. The parameters for the general extreme value distribution can modify the expected damages. Particular the *location* μ and *scale* σ parameter can increase the average expected damage or increase the uncertainty where even larger damages are possible.
+
+Light industrial building can vary in size, that is area and height and contents can be located in different parts of the building, therefore the contents and inventory expected damages can vary importantly. Nevertheless, for the structural component, there are not much variation in the industrial ‘warehouses’, therefore, these kinds of curves can lead to valuable damage information is calibrated properly.
+
+Further work can be focus on the depth-damage curve selection (where uncertainty can be also considered), and for other kind of floods (e.g. storm surge, ocean level rise, high current floods), hazard intensity probability distribution selection and calibration, and water elevation calculation for a given point considering the gauge information and location.
